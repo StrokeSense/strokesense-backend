@@ -1,70 +1,141 @@
-import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import helmet from "helmet";
-import morgan from "morgan";
-import { nanoid } from "nanoid";
-import { z } from "zod";
+import dotenv from "dotenv";
 
 import { getPrediction } from "./aiClient.js";
 import {
-  deletePredictionById,
+  createPrediction,
+  deletePrediction,
   getPredictionById,
-  getPredictions,
-  initStore,
-  savePrediction
+  listPredictions
 } from "./store.js";
+
+dotenv.config();
 
 const app = express();
 
-const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = process.env.FRONTEND_URL || "*";
+const RAW_FEATURE_KEYS = [
+  "age",
+  "hypertension",
+  "heart_disease",
+  "ever_married",
+  "work_type",
+  "avg_glucose_level",
+  "bmi",
+  "smoking_status"
+];
 
-app.use(helmet());
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  "http://localhost:5173",
+  "http://localhost:3000"
+].filter(Boolean);
 
 app.use(
   cors({
-    origin: FRONTEND_URL === "*" ? true : FRONTEND_URL
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`CORS blocked request from origin: ${origin}`));
+    },
+    credentials: true
   })
 );
 
-app.use(express.json({ limit: "1mb" }));
-app.use(morgan("dev"));
+app.use(express.json());
 
-const fieldOptions = {
-  hypertension: [
-    { label: "No", value: 0 },
-    { label: "Yes", value: 1 }
-  ],
-  heart_disease: [
-    { label: "No", value: 0 },
-    { label: "Yes", value: 1 }
-  ],
-  ever_married: ["Yes", "No"],
-  work_type: ["children", "Govt_job", "Never_worked", "Private", "Self-employed"],
-  smoking_status: ["formerly smoked", "never smoked", "smokes", "Unknown"]
-};
+function validatePredictionInput(input) {
+  const errors = [];
 
-const predictionSchema = z.object({
-  age: z.coerce.number().min(0).max(120),
-  hypertension: z.coerce.number().int().min(0).max(1),
-  heart_disease: z.coerce.number().int().min(0).max(1),
-  ever_married: z.enum(["Yes", "No"]),
-  work_type: z.enum(["children", "Govt_job", "Never_worked", "Private", "Self-employed"]),
-  avg_glucose_level: z.coerce.number().min(0).max(400),
-  bmi: z.coerce.number().min(5).max(100),
-  smoking_status: z.enum(["formerly smoked", "never smoked", "smokes", "Unknown"])
-});
+  for (const key of RAW_FEATURE_KEYS) {
+    if (input[key] === undefined || input[key] === null || input[key] === "") {
+      errors.push(`${key} is required.`);
+    }
+  }
+
+  const age = Number(input.age);
+  const hypertension = Number(input.hypertension);
+  const heartDisease = Number(input.heart_disease);
+  const avgGlucoseLevel = Number(input.avg_glucose_level);
+  const bmi = Number(input.bmi);
+
+  if (!Number.isFinite(age) || age < 0 || age > 120) {
+    errors.push("age must be a number between 0 and 120.");
+  }
+
+  if (![0, 1].includes(hypertension)) {
+    errors.push("hypertension must be 0 or 1.");
+  }
+
+  if (![0, 1].includes(heartDisease)) {
+    errors.push("heart_disease must be 0 or 1.");
+  }
+
+  if (!["Yes", "No"].includes(input.ever_married)) {
+    errors.push("ever_married must be Yes or No.");
+  }
+
+  if (
+    !["children", "Govt_job", "Never_worked", "Private", "Self-employed"].includes(
+      input.work_type
+    )
+  ) {
+    errors.push(
+      "work_type must be one of children, Govt_job, Never_worked, Private, Self-employed."
+    );
+  }
+
+  if (
+    !Number.isFinite(avgGlucoseLevel) ||
+    avgGlucoseLevel < 0 ||
+    avgGlucoseLevel > 400
+  ) {
+    errors.push("avg_glucose_level must be a number between 0 and 400.");
+  }
+
+  if (!Number.isFinite(bmi) || bmi < 5 || bmi > 100) {
+    errors.push("bmi must be a number between 5 and 100.");
+  }
+
+  if (
+    !["formerly smoked", "never smoked", "smokes", "Unknown"].includes(
+      input.smoking_status
+    )
+  ) {
+    errors.push(
+      "smoking_status must be one of formerly smoked, never smoked, smokes, Unknown."
+    );
+  }
+
+  return errors;
+}
+
+function normalizeInput(input) {
+  return {
+    age: Number(input.age),
+    hypertension: Number(input.hypertension),
+    heart_disease: Number(input.heart_disease),
+    ever_married: input.ever_married,
+    work_type: input.work_type,
+    avg_glucose_level: Number(input.avg_glucose_level),
+    bmi: Number(input.bmi),
+    smoking_status: input.smoking_status
+  };
+}
 
 app.get("/", (req, res) => {
   res.json({
     success: true,
-    message: "StrokeSense backend API is running.",
+    service: "StrokeSense Backend API",
+    status: "running",
     endpoints: {
-      health: "GET /api/health",
-      fields: "GET /api/fields",
-      predict: "POST /api/predict",
-      predictionHistory: "GET /api/predictions"
+      health: "/api/health",
+      fields: "/api/fields",
+      predict: "/api/predict",
+      predictions: "/api/predictions"
     }
   });
 });
@@ -72,66 +143,81 @@ app.get("/", (req, res) => {
 app.get("/api/health", (req, res) => {
   res.json({
     success: true,
-    status: "healthy",
-    service: "StrokeSense Backend",
-    timestamp: new Date().toISOString()
+    status: "ok",
+    service: "StrokeSense Backend API",
+    aiApiConfigured: Boolean(process.env.AI_API_URL),
+    aiApiUrl: process.env.AI_API_URL || null,
+    modelVersion: process.env.AI_MODEL_VERSION || "unknown"
   });
 });
 
 app.get("/api/fields", (req, res) => {
   res.json({
     success: true,
-    data: fieldOptions
+    data: {
+      requiredFields: RAW_FEATURE_KEYS,
+      options: {
+        ever_married: ["Yes", "No"],
+        work_type: [
+          "children",
+          "Govt_job",
+          "Never_worked",
+          "Private",
+          "Self-employed"
+        ],
+        smoking_status: ["formerly smoked", "never smoked", "smokes", "Unknown"],
+        hypertension: [0, 1],
+        heart_disease: [0, 1]
+      }
+    }
   });
 });
 
 app.post("/api/predict", async (req, res) => {
-  const parsed = predictionSchema.safeParse(req.body);
+  try {
+    const errors = validatePredictionInput(req.body);
 
-  if (!parsed.success) {
-    return res.status(400).json({
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid prediction input.",
+        errors
+      });
+    }
+
+    const input = normalizeInput(req.body);
+    const result = await getPrediction(input);
+
+    const predictionRecord = createPrediction({
+      input,
+      prediction: result.prediction,
+      modelSource: result.modelSource,
+      modelVersion: result.modelVersion
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Prediction created successfully.",
+      data: predictionRecord
+    });
+  } catch (error) {
+    return res.status(500).json({
       success: false,
-      message: "Validation failed. Please check the submitted fields.",
-      errors: parsed.error.flatten().fieldErrors
+      message: "Failed to create prediction.",
+      error: error.message
     });
   }
-
-  const input = parsed.data;
-  const predictionResult = await getPrediction(input);
-
-  const record = {
-    id: nanoid(10),
-    createdAt: new Date().toISOString(),
-    input,
-    prediction: predictionResult.prediction,
-    modelSource: predictionResult.modelSource,
-    modelVersion: predictionResult.modelVersion
-  };
-
-  await savePrediction(record);
-
-  return res.status(201).json({
-    success: true,
-    message: "Prediction created successfully.",
-    data: record
-  });
 });
 
-app.get("/api/predictions", async (req, res) => {
-  const limit = Number(req.query.limit || 50);
-  const safeLimit = Number.isNaN(limit) ? 50 : Math.min(Math.max(limit, 1), 100);
-
-  const predictions = await getPredictions(safeLimit);
-
+app.get("/api/predictions", (req, res) => {
   res.json({
     success: true,
-    count: predictions.length,
-    data: predictions
+    data: listPredictions()
   });
 });
 
-app.get("/api/predictions/:id", async (req, res) => {
-  const prediction = await getPredictionById(req.params.id);
+app.get("/api/predictions/:id", (req, res) => {
+  const prediction = getPredictionById(req.params.id);
 
   if (!prediction) {
     return res.status(404).json({
@@ -146,8 +232,8 @@ app.get("/api/predictions/:id", async (req, res) => {
   });
 });
 
-app.delete("/api/predictions/:id", async (req, res) => {
-  const deleted = await deletePredictionById(req.params.id);
+app.delete("/api/predictions/:id", (req, res) => {
+  const deleted = deletePrediction(req.params.id);
 
   if (!deleted) {
     return res.status(404).json({
@@ -162,24 +248,12 @@ app.delete("/api/predictions/:id", async (req, res) => {
   });
 });
 
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message: "Route not found."
+export default app;
+
+if (process.env.NODE_ENV !== "production") {
+  const PORT = process.env.PORT || 3000;
+
+  app.listen(PORT, () => {
+    console.log(`StrokeSense backend running on http://localhost:${PORT}`);
   });
-});
-
-app.use((error, req, res, next) => {
-  console.error(error);
-
-  res.status(500).json({
-    success: false,
-    message: "Internal server error."
-  });
-});
-
-await initStore();
-
-app.listen(PORT, () => {
-  console.log(`StrokeSense backend running on http://localhost:${PORT}`);
-});
+}
