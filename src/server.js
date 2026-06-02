@@ -25,21 +25,34 @@ const RAW_FEATURE_KEYS = [
   "smoking_status"
 ];
 
+// CORS setup
+// This allows:
+// - local frontend during development
+// - your deployed frontend URL from FRONTEND_URL env
+// - Vercel preview/production frontend URLs
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   "http://localhost:5173",
-  "http://localhost:3000"
+  "http://127.0.0.1:5173"
 ].filter(Boolean);
 
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-        return;
+      // Allow requests with no origin, like curl/Postman/server-to-server
+      if (!origin) {
+        return callback(null, true);
       }
 
-      callback(new Error(`CORS blocked request from origin: ${origin}`));
+      const isAllowed =
+        allowedOrigins.includes(origin) ||
+        origin.endsWith(".vercel.app");
+
+      if (isAllowed) {
+        return callback(null, true);
+      }
+
+      return callback(new Error(`CORS blocked request from origin: ${origin}`));
     },
     credentials: true
   })
